@@ -1063,6 +1063,8 @@ private:
     bool consider_calls, consider_provides;
     Scope<Interval> scope;
     const FuncValueBounds &func_bounds;
+    int level = 0;
+    Scope<int> level_scope;
 
     using IRGraphVisitor::visit;
 
@@ -1131,6 +1133,8 @@ private:
         value_bounds.min = simplify(value_bounds.min);
         value_bounds.max = fixed ? value_bounds.min : simplify(value_bounds.max);
 
+        level += 1;
+        level_scope.push(op->name, level);
         if (is_small_enough_to_substitute(value_bounds.min) &&
             (fixed || is_small_enough_to_substitute(value_bounds.max))) {
             scope.push(op->name, value_bounds);
@@ -1167,6 +1171,8 @@ private:
                 }
             }
         }
+        level_scope.pop(op->name);
+        level -= 1;
     }
 
     void visit(const Let *op) {
@@ -1207,7 +1213,18 @@ private:
                 string var_to_pop;
                 if (a.defined() && b.defined() && a.type() == Int(32)) {
                     Expr inner_min, inner_max;
-                    if (var_a && scope.contains(var_a->name)) {
+                    bool trim_a = var_a && scope.contains(var_a->name);
+                    bool trim_b = var_b && scope.contains(var_b->name);
+                    // If both sides can be trimmed, prioritize over variable
+                    // that is declared more further down.
+                    if (trim_a && trim_b &&
+                        level_scope.contains(var_a->name) &&
+                        level_scope.contains(var_b->name)) {
+                        trim_a = level_scope.get(var_a->name) >= level_scope.get(var_b->name);
+                        trim_b = !trim_a;
+                    }
+
+                    if (trim_a) {
                         Interval i = scope.get(var_a->name);
 
                         // If the original condition is likely, then
@@ -1243,7 +1260,7 @@ private:
                         }
                         scope.push(var_a->name, i);
                         var_to_pop = var_a->name;
-                    } else if (var_b && scope.contains(var_b->name)) {
+                    } else if (trim_b) {
                         Interval i = scope.get(var_b->name);
 
                         Interval likely_i = i;
@@ -1353,9 +1370,13 @@ private:
             max_val -= 1;
         }
 
+        level += 1;
+        level_scope.push(op->name, level);
         scope.push(op->name, Interval(min_val, max_val));
         op->body.accept(this);
         scope.pop(op->name);
+        level_scope.pop(op->name);
+        level -= 1;
     }
 
     void visit(const Provide *op) {
